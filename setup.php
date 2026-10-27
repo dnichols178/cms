@@ -59,24 +59,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                 PDO::ATTR_EMULATE_PREPARES   => false,
             ]);
 
-            // Disable strict zero-date modes for structural DDL execution
-            $pdo->exec("SET SESSION sql_mode = ''");
-
-            // Inspect DB server version to ensure universal default value syntax
-            $raw_version = (string)$pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
-            $is_legacy = false;
-            if (preg_match('/^(\d+\.\d+\.\d+)/', $raw_version, $matches)) {
-                $is_legacy = version_compare($matches[1], '5.6.5', '<');
-            }
-
-            $col_created = $is_legacy 
-                ? '`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP' 
-                : '`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP';
-                
-            $col_updated = $is_legacy 
-                ? '`updated_at` DATETIME NULL DEFAULT NULL' 
-                : '`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP';
-
             // Execute Complete Structural Schema DDL
             $pdo->exec("
                 -- 1. Users, Roles & Permissions
@@ -86,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `password_hash` VARCHAR(255) NOT NULL,
                     `email` VARCHAR(254) NOT NULL UNIQUE,
                     `status` TINYINT(1) NOT NULL DEFAULT 1,
-                    {$col_created}
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `roles` (
@@ -126,7 +108,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `fields_schema` JSON NOT NULL,
                     `has_body` TINYINT(1) NOT NULL DEFAULT 1,
                     `url_pattern` VARCHAR(255) NULL DEFAULT '[node:title]',
-                    {$col_created}
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `nodes` (
@@ -144,8 +126,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `publish_on` DATETIME NULL,
                     `unpublish_on` DATETIME NULL,
                     `template` VARCHAR(64) NULL,
-                    {$col_created},
-                    {$col_updated},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX `idx_node_type` (`type`),
                     INDEX `idx_node_status` (`status`)
                 ) ENGINE=InnoDB;
@@ -159,7 +141,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `keywords` TEXT NULL,
                     `fields_data` JSON NULL,
                     `log_message` VARCHAR(255) NULL,
-                    {$col_created},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (`node_id`) REFERENCES `nodes`(`id`) ON DELETE CASCADE
                 ) ENGINE=InnoDB;
 
@@ -215,7 +197,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `visibility_mode` ENUM('show_only', 'show_except') NOT NULL DEFAULT 'show_only',
                     `visibility_types` VARCHAR(255) NULL DEFAULT '',
                     `visibility_roles` VARCHAR(255) NULL DEFAULT '',
-                    {$col_created},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX `idx_region_status` (`region`, `status`)
                 ) ENGINE=InnoDB;
 
@@ -233,7 +215,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `status` TINYINT(1) NOT NULL DEFAULT 1,
                     `start_date` DATETIME NULL,
                     `end_date` DATETIME NULL,
-                    {$col_created},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX `idx_alert_status` (`status`, `start_date`, `end_date`)
                 ) ENGINE=InnoDB;
 
@@ -246,8 +228,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `conditions` JSON NULL,
                     `actions` JSON NOT NULL,
                     `status` TINYINT(1) NOT NULL DEFAULT 1,
-                    {$col_created},
-                    {$col_updated},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     INDEX `idx_event_status` (`event`, `status`)
                 ) ENGINE=InnoDB;
 
@@ -262,7 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `device_type` ENUM('desktop', 'mobile', 'tablet', 'bot') NOT NULL DEFAULT 'desktop',
                     `session_hash` CHAR(32) NOT NULL,
                     `is_staff` TINYINT(1) NOT NULL DEFAULT 0,
-                    {$col_created},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX `idx_created_path` (`created_at`, `path`),
                     INDEX `idx_session_time` (`session_hash`, `created_at`),
                     INDEX `idx_node_id` (`node_id`)
@@ -277,7 +259,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `message` TEXT NOT NULL,
                     `ip_address` VARCHAR(45) NOT NULL,
                     `status` ENUM('unread', 'read') NOT NULL DEFAULT 'unread',
-                    {$col_created}
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `url_redirects` (
@@ -285,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `source_path` VARCHAR(255) NOT NULL UNIQUE,
                     `target_path` VARCHAR(255) NOT NULL,
                     `status_code` SMALLINT UNSIGNED NOT NULL DEFAULT 301,
-                    {$col_created}
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
 
                 -- 10. Outbound Mailer Queue & Dispatch Logs
@@ -301,7 +283,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `max_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 5,
                     `last_error` TEXT NULL,
                     `locked_until` DATETIME NULL,
-                    {$col_created},
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     INDEX `idx_dispatch` (`priority`, `attempts`, `locked_until`)
                 ) ENGINE=InnoDB;
 
@@ -320,13 +302,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `cid` VARCHAR(128) PRIMARY KEY,
                     `data` MEDIUMTEXT NOT NULL,
                     `expire` INT NOT NULL DEFAULT 0,
-                    {$col_created}
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `site_settings` (
                     `setting_key` VARCHAR(64) PRIMARY KEY,
                     `setting_value` TEXT NULL,
-                    {$col_updated}
+                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `watchdog` (
@@ -353,61 +335,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `special_accommodations` TEXT NULL,
                     `ip_address` VARCHAR(45) NOT NULL,
                     `status` ENUM('pending', 'confirmed', 'cancelled') NOT NULL DEFAULT 'pending',
-                    {$col_created}
-                ) ENGINE=InnoDB;
-
-                -- 12. Views Engine
-                CREATE TABLE IF NOT EXISTS `views` (
-                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                    `name` VARCHAR(128) NOT NULL,
-                    `machine_name` VARCHAR(64) NOT NULL UNIQUE,
-                    `description` TEXT NULL,
-                    `base_table` VARCHAR(64) NOT NULL DEFAULT 'nodes',
-                    `display_type` VARCHAR(20) NOT NULL DEFAULT 'block',
-                    `path` VARCHAR(255) NULL,
-                    `block_id` INT UNSIGNED NULL,
-                    `configuration` LONGTEXT NOT NULL,
-                    `status` TINYINT(1) NOT NULL DEFAULT 1,
-                    {$col_created},
-                    {$col_updated},
-                    INDEX (`machine_name`),
-                    INDEX (`status`),
-                    INDEX (`path`)
-                ) ENGINE=InnoDB;
-
-                -- 13. Event Registrations Engine
-                CREATE TABLE IF NOT EXISTS `registration_forms` (
-                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                    `title` VARCHAR(255) NOT NULL,
-                    `slug` VARCHAR(128) NOT NULL UNIQUE,
-                    `description` TEXT NULL,
-                    `host_type` ENUM('page', 'block') NOT NULL DEFAULT 'page',
-                    `capacity` INT UNSIGNED NOT NULL DEFAULT 0,
-                    `allow_waitlist` TINYINT(1) NOT NULL DEFAULT 1,
-                    `open_date` DATETIME NULL,
-                    `close_date` DATETIME NULL,
-                    `confirmation_message` TEXT NULL,
-                    `fields_schema` JSON NULL,
-                    `status` TINYINT(1) NOT NULL DEFAULT 1,
-                    {$col_created}
-                ) ENGINE=InnoDB;
-
-                CREATE TABLE IF NOT EXISTS `registrations` (
-                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                    `form_id` INT UNSIGNED NOT NULL DEFAULT 0,
-                    `user_id` INT UNSIGNED NULL,
-                    `name` VARCHAR(120) NOT NULL,
-                    `email` VARCHAR(254) NOT NULL,
-                    `phone` VARCHAR(30) NULL,
-                    `organization` VARCHAR(150) NULL,
-                    `slots` TINYINT UNSIGNED NOT NULL DEFAULT 1,
-                    `state` ENUM('complete', 'waitlist', 'cancelled') NOT NULL DEFAULT 'complete',
-                    `submission_data` JSON NULL,
-                    `ip_address` VARCHAR(45) NOT NULL,
-                    {$col_created},
-                    INDEX (`form_id`),
-                    INDEX (`email`),
-                    INDEX (`state`)
+                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB;
             ");
 
@@ -817,7 +745,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                         <label>Admin Password (8+ characters) *</label>
                         <input type="password" name="admin_pass" minlength="8" required>
                     </div>
-
                     <button type="submit" class="btn-install">Initialize Database & Install Platform</button>
                 </form>
             <?php endif; ?>
