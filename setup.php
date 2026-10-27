@@ -1,10 +1,17 @@
-<?php
-declare(strict_types=1);
+<?php declare(strict_types=1);
+
+// 0. Dynamic Runtime Base Path Resolver (Supports root '/' or any subfolder deployment)
+$script_path = str_replace('\\', '/', $_SERVER['SCRIPT_NAME'] ?? '');
+$dir_path = dirname($script_path);
+$base_path = ($dir_path === '/' || $dir_path === '\\' || $dir_path === '.') ? '' : rtrim($dir_path, '/');
+$home_url = ($base_path !== '' ? $base_path : '') . '/home';
+$login_url = ($base_path !== '' ? $base_path : '') . '/admin/index.php';
+$css_url = ($base_path !== '' ? $base_path : '') . '/assets/css/style.css';
 
 // Prevent re-installation if already locked
 $lock_file = __DIR__ . '/config/installed.lock';
 if (file_exists($lock_file)) {
-    die('<!DOCTYPE html><html><head><title>CMS Already Installed</title><link rel="stylesheet" href="/cms/assets/css/style.css"></head><body style="padding:40px; font-family:sans-serif; text-align:center;"><h2>Installation Locked</h2><p>This CMS instance is already installed and locked for security. To re-run setup, delete <code>config/installed.lock</code>.</p><p><a href="/cms/home" style="display:inline-block; padding:10px 20px; background:#0b2545; color:#fff; text-decoration:none; border-radius:4px;">Go to Site Home</a></p></body></html>');
+    die('<!DOCTYPE html><html><head><title>CMS Already Installed</title><link rel="stylesheet" href="' . htmlspecialchars($css_url) . '"></head><body style="padding:40px; font-family:sans-serif; text-align:center;"><h2>Installation Locked</h2><p>This CMS instance is already installed and locked for security. To re-run setup, delete <code>config/installed.lock</code>.</p><p><a href="' . htmlspecialchars($home_url) . '" style="display:inline-block; padding:10px 20px; background:#0b2545; color:#fff; text-decoration:none; border-radius:4px;">Go to Site Home</a></p></body></html>');
 }
 
 $errors = [];
@@ -19,17 +26,15 @@ $env_checks = [
     'Config Directory Writable'     => is_writable(__DIR__ . '/config') || (!file_exists(__DIR__ . '/config') && is_writable(__DIR__)),
     'Uploads Directory Writable'    => is_writable(__DIR__ . '/uploads') || (!file_exists(__DIR__ . '/uploads') && is_writable(__DIR__)),
 ];
-
 $can_install = !in_array(false, $env_checks, true);
 
 // 2. Handle Installation POST Request
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
-    $db_host = trim($_POST['db_host'] ?? '127.0.0.1');
-    $db_port = (int)($_POST['db_port'] ?? 3306);
-    $db_name = trim($_POST['db_name'] ?? '');
-    $db_user = trim($_POST['db_user'] ?? '');
-    $db_pass = (string)($_POST['db_pass'] ?? '');
-
+    $db_host     = trim($_POST['db_host'] ?? '127.0.0.1');
+    $db_port     = (int)($_POST['db_port'] ?? 3306);
+    $db_name     = trim($_POST['db_name'] ?? '');
+    $db_user     = trim($_POST['db_user'] ?? '');
+    $db_pass     = (string)($_POST['db_pass'] ?? '');
     $site_name   = trim($_POST['site_name'] ?? 'Four Rivers Nuclear Partnership');
     $admin_user  = trim($_POST['admin_user'] ?? '');
     $admin_email = trim($_POST['admin_email'] ?? '');
@@ -54,21 +59,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                 PDO::ATTR_EMULATE_PREPARES   => false,
             ]);
 
-            // Execute Full Schema DDL
+            // Disable strict zero-date modes for structural DDL execution
+            $pdo->exec("SET SESSION sql_mode = ''");
+
+            // Inspect DB server version to ensure universal default value syntax
+            $raw_version = (string)$pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
+            $is_legacy = false;
+            if (preg_match('/^(\d+\.\d+\.\d+)/', $raw_version, $matches)) {
+                $is_legacy = version_compare($matches[1], '5.6.5', '<');
+            }
+
+            $col_created = $is_legacy 
+                ? '`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP' 
+                : '`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP';
+                
+            $col_updated = $is_legacy 
+                ? '`updated_at` DATETIME NULL DEFAULT NULL' 
+                : '`updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP';
+
+            // Execute Complete Structural Schema DDL
             $pdo->exec("
-                -- 1. Users & Roles
+                -- 1. Users, Roles & Permissions
                 CREATE TABLE IF NOT EXISTS `users` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     `username` VARCHAR(64) NOT NULL UNIQUE,
-                    `password` VARCHAR(255) NOT NULL,
+                    `password_hash` VARCHAR(255) NOT NULL,
                     `email` VARCHAR(254) NOT NULL UNIQUE,
                     `status` TINYINT(1) NOT NULL DEFAULT 1,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    {$col_created}
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `roles` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                    `name` VARCHAR(32) NOT NULL UNIQUE,
+                    `machine_name` VARCHAR(32) NOT NULL UNIQUE,
+                    `label` VARCHAR(64) NOT NULL,
                     `description` VARCHAR(255) NULL
                 ) ENGINE=InnoDB;
 
@@ -82,7 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
 
                 CREATE TABLE IF NOT EXISTS `permissions` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                    `name` VARCHAR(64) NOT NULL UNIQUE,
+                    `machine_name` VARCHAR(64) NOT NULL UNIQUE,
                     `description` VARCHAR(255) NULL
                 ) ENGINE=InnoDB;
 
@@ -94,23 +118,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     FOREIGN KEY (`permission_id`) REFERENCES `permissions`(`id`) ON DELETE CASCADE
                 ) ENGINE=InnoDB;
 
-                -- 2. Content Types & Field Schema
+                -- 2. Content Architecture & Pathauto Patterns
                 CREATE TABLE IF NOT EXISTS `content_types` (
                     `type` VARCHAR(32) PRIMARY KEY,
                     `name` VARCHAR(128) NOT NULL,
                     `description` TEXT NULL,
                     `fields_schema` JSON NOT NULL,
                     `has_body` TINYINT(1) NOT NULL DEFAULT 1,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    `url_pattern` VARCHAR(255) NULL DEFAULT '[node:title]',
+                    {$col_created}
                 ) ENGINE=InnoDB;
 
-                -- 3. Content Nodes & Revisions
                 CREATE TABLE IF NOT EXISTS `nodes` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     `type` VARCHAR(32) NOT NULL,
                     `title` VARCHAR(255) NOT NULL,
                     `slug` VARCHAR(255) NOT NULL UNIQUE,
+                    `auto_slug` TINYINT(1) NOT NULL DEFAULT 1,
                     `body` MEDIUMTEXT NULL,
+                    `format` VARCHAR(32) NOT NULL DEFAULT 'filtered_html',
                     `keywords` TEXT NULL,
                     `fields_data` JSON NULL,
                     `uid` INT UNSIGNED NOT NULL DEFAULT 1,
@@ -118,8 +144,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `publish_on` DATETIME NULL,
                     `unpublish_on` DATETIME NULL,
                     `template` VARCHAR(64) NULL,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    {$col_created},
+                    {$col_updated},
                     INDEX `idx_node_type` (`type`),
                     INDEX `idx_node_status` (`status`)
                 ) ENGINE=InnoDB;
@@ -130,26 +156,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `uid` INT UNSIGNED NOT NULL,
                     `title` VARCHAR(255) NOT NULL,
                     `body` MEDIUMTEXT NULL,
+                    `keywords` TEXT NULL,
                     `fields_data` JSON NULL,
                     `log_message` VARCHAR(255) NULL,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    {$col_created},
                     FOREIGN KEY (`node_id`) REFERENCES `nodes`(`id`) ON DELETE CASCADE
                 ) ENGINE=InnoDB;
 
-                -- 4. Taxonomy & Terms
+                -- 3. Taxonomy Vocabularies & Terms
                 CREATE TABLE IF NOT EXISTS `taxonomy_vocabularies` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     `machine_name` VARCHAR(32) NOT NULL UNIQUE,
-                    `name` VARCHAR(64) NOT NULL
+                    `name` VARCHAR(64) NOT NULL,
+                    `description` TEXT NULL
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `taxonomy_terms` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                    `vid` INT UNSIGNED NOT NULL,
+                    `vocabulary_id` INT UNSIGNED NOT NULL,
                     `name` VARCHAR(128) NOT NULL,
                     `slug` VARCHAR(128) NOT NULL,
-                    UNIQUE KEY `uk_term_vid_slug` (`vid`, `slug`),
-                    FOREIGN KEY (`vid`) REFERENCES `taxonomy_vocabularies`(`id`) ON DELETE CASCADE
+                    `weight` INT NOT NULL DEFAULT 0,
+                    `description` TEXT NULL,
+                    UNIQUE KEY `uk_term_vocab_slug` (`vocabulary_id`, `slug`),
+                    FOREIGN KEY (`vocabulary_id`) REFERENCES `taxonomy_vocabularies`(`id`) ON DELETE CASCADE
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `node_terms` (
@@ -160,7 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     FOREIGN KEY (`term_id`) REFERENCES `taxonomy_terms`(`id`) ON DELETE CASCADE
                 ) ENGINE=InnoDB;
 
-                -- 5. Hierarchical Navigation Menus
+                -- 4. Menus & Hierarchy
                 CREATE TABLE IF NOT EXISTS `menu_items` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     `menu_name` VARCHAR(32) NOT NULL DEFAULT 'main',
@@ -173,57 +203,144 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     INDEX `idx_parent_id` (`parent_id`)
                 ) ENGINE=InnoDB;
 
-                -- 6. Dynamic Views Engine
-                CREATE TABLE IF NOT EXISTS `views` (
+                -- 5. Block Visibility Matrix
+                CREATE TABLE IF NOT EXISTS `blocks` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                    `machine_name` VARCHAR(64) NOT NULL UNIQUE,
                     `title` VARCHAR(128) NOT NULL,
-                    `path` VARCHAR(128) NOT NULL UNIQUE,
-                    `content_type` VARCHAR(32) NOT NULL,
-                    `layout_style` ENUM('teaser_list', 'grid_cards', 'data_table') NOT NULL DEFAULT 'teaser_list',
-                    `items_per_page` TINYINT UNSIGNED NOT NULL DEFAULT 10,
-                    `sort_field` VARCHAR(32) NOT NULL DEFAULT 'created_at',
-                    `sort_order` ENUM('ASC', 'DESC') NOT NULL DEFAULT 'DESC',
-                    `exposed_taxonomy` TINYINT(1) NOT NULL DEFAULT 1,
-                    `exposed_search` TINYINT(1) NOT NULL DEFAULT 1,
-                    `header_text` TEXT NULL,
+                    `region` VARCHAR(32) NOT NULL DEFAULT 'sidebar',
+                    `body` MEDIUMTEXT NOT NULL,
+                    `weight` INT NOT NULL DEFAULT 0,
                     `status` TINYINT(1) NOT NULL DEFAULT 1,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    `visibility_pages` TEXT NULL,
+                    `visibility_mode` ENUM('show_only', 'show_except') NOT NULL DEFAULT 'show_only',
+                    `visibility_types` VARCHAR(255) NULL DEFAULT '',
+                    `visibility_roles` VARCHAR(255) NULL DEFAULT '',
+                    {$col_created},
+                    INDEX `idx_region_status` (`region`, `status`)
                 ) ENGINE=InnoDB;
 
-                -- 7. System Settings & Watchdog
+                -- 6. Alerts & Modal Broadcasts
+                CREATE TABLE IF NOT EXISTS `site_alerts` (
+                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `title` VARCHAR(255) NOT NULL,
+                    `message` TEXT NOT NULL,
+                    `display_type` ENUM('modal', 'banner_top') NOT NULL DEFAULT 'modal',
+                    `severity` ENUM('info', 'warning', 'emergency', 'success') NOT NULL DEFAULT 'warning',
+                    `target_pages` VARCHAR(255) NULL DEFAULT '<front>',
+                    `cta_label` VARCHAR(100) NULL,
+                    `cta_url` VARCHAR(255) NULL,
+                    `dismissible` TINYINT(1) NOT NULL DEFAULT 1,
+                    `status` TINYINT(1) NOT NULL DEFAULT 1,
+                    `start_date` DATETIME NULL,
+                    `end_date` DATETIME NULL,
+                    {$col_created},
+                    INDEX `idx_alert_status` (`status`, `start_date`, `end_date`)
+                ) ENGINE=InnoDB;
+
+                -- 7. Custom Rules & Event Automation (ECA)
+                CREATE TABLE IF NOT EXISTS `custom_rules` (
+                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `label` VARCHAR(128) NOT NULL,
+                    `machine_name` VARCHAR(64) NOT NULL UNIQUE,
+                    `event` VARCHAR(64) NOT NULL,
+                    `conditions` JSON NULL,
+                    `actions` JSON NOT NULL,
+                    `status` TINYINT(1) NOT NULL DEFAULT 1,
+                    {$col_created},
+                    {$col_updated},
+                    INDEX `idx_event_status` (`event`, `status`)
+                ) ENGINE=InnoDB;
+
+                -- 8. Real-Time Telemetry & Visitor Analytics
+                CREATE TABLE IF NOT EXISTS `analytics_hits` (
+                    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `path` VARCHAR(255) NOT NULL,
+                    `node_id` INT UNSIGNED NULL,
+                    `ip_address` VARCHAR(45) NOT NULL,
+                    `user_agent` VARCHAR(255) NULL,
+                    `referer` VARCHAR(255) NULL,
+                    `device_type` ENUM('desktop', 'mobile', 'tablet', 'bot') NOT NULL DEFAULT 'desktop',
+                    `session_hash` CHAR(32) NOT NULL,
+                    `is_staff` TINYINT(1) NOT NULL DEFAULT 0,
+                    {$col_created},
+                    INDEX `idx_created_path` (`created_at`, `path`),
+                    INDEX `idx_session_time` (`session_hash`, `created_at`),
+                    INDEX `idx_node_id` (`node_id`)
+                ) ENGINE=InnoDB;
+
+                -- 9. Inbound Forms, Submissions & Redirects
+                CREATE TABLE IF NOT EXISTS `contact_submissions` (
+                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `name` VARCHAR(100) NOT NULL,
+                    `email` VARCHAR(254) NOT NULL,
+                    `subject` VARCHAR(200) NOT NULL,
+                    `message` TEXT NOT NULL,
+                    `ip_address` VARCHAR(45) NOT NULL,
+                    `status` ENUM('unread', 'read') NOT NULL DEFAULT 'unread',
+                    {$col_created}
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS `url_redirects` (
+                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `source_path` VARCHAR(255) NOT NULL UNIQUE,
+                    `target_path` VARCHAR(255) NOT NULL,
+                    `status_code` SMALLINT UNSIGNED NOT NULL DEFAULT 301,
+                    {$col_created}
+                ) ENGINE=InnoDB;
+
+                -- 10. Outbound Mailer Queue & Dispatch Logs
+                CREATE TABLE IF NOT EXISTS `email_queue` (
+                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `recipient` VARCHAR(254) NOT NULL,
+                    `recipient_name` VARCHAR(120) NULL,
+                    `subject` VARCHAR(255) NOT NULL,
+                    `body_html` MEDIUMTEXT NOT NULL,
+                    `body_text` MEDIUMTEXT NULL,
+                    `priority` TINYINT UNSIGNED NOT NULL DEFAULT 3,
+                    `attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                    `max_attempts` TINYINT UNSIGNED NOT NULL DEFAULT 5,
+                    `last_error` TEXT NULL,
+                    `locked_until` DATETIME NULL,
+                    {$col_created},
+                    INDEX `idx_dispatch` (`priority`, `attempts`, `locked_until`)
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS `email_logs` (
+                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `recipient` VARCHAR(254) NOT NULL,
+                    `subject` VARCHAR(255) NOT NULL,
+                    `status` ENUM('sent', 'failed') NOT NULL DEFAULT 'sent',
+                    `error_message` TEXT NULL,
+                    `ip_address` VARCHAR(45) NOT NULL,
+                    `dispatched_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB;
+
+                -- 11. System Buffer Cache, Watchdog & Settings
+                CREATE TABLE IF NOT EXISTS `cache_data` (
+                    `cid` VARCHAR(128) PRIMARY KEY,
+                    `data` MEDIUMTEXT NOT NULL,
+                    `expire` INT NOT NULL DEFAULT 0,
+                    {$col_created}
+                ) ENGINE=InnoDB;
+
                 CREATE TABLE IF NOT EXISTS `site_settings` (
                     `setting_key` VARCHAR(64) PRIMARY KEY,
                     `setting_value` TEXT NULL,
-                    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    {$col_updated}
                 ) ENGINE=InnoDB;
 
                 CREATE TABLE IF NOT EXISTS `watchdog` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    `uid` INT UNSIGNED NULL,
                     `type` VARCHAR(32) NOT NULL,
                     `message` TEXT NOT NULL,
                     `severity` VARCHAR(16) NOT NULL DEFAULT 'notice',
-                    `uid` INT UNSIGNED NULL,
-                    `ip` VARCHAR(45) NULL,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    `link` VARCHAR(255) NULL,
+                    `ip_address` VARCHAR(45) NULL,
+                    `timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX `idx_type_severity` (`type`, `severity`)
                 ) ENGINE=InnoDB;
 
-                -- 8. Mailer Queue
-                CREATE TABLE IF NOT EXISTS `emails` (
-                    `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                    `recipient` VARCHAR(254) NOT NULL,
-                    `subject` VARCHAR(255) NOT NULL,
-                    `body_html` MEDIUMTEXT NOT NULL,
-                    `body_text` MEDIUMTEXT NULL,
-                    `sender_name` VARCHAR(100) NOT NULL DEFAULT 'FRNP Communications',
-                    `status` ENUM('pending', 'sent', 'failed') NOT NULL DEFAULT 'pending',
-                    `attempts` TINYINT UNSIGNED NOT NULL DEFAULT 0,
-                    `error_message` TEXT NULL,
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    `sent_at` DATETIME NULL
-                ) ENGINE=InnoDB;
-
-                -- 9. Custom Function: Tour Reservations
                 CREATE TABLE IF NOT EXISTS `tour_reservations` (
                     `id` INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     `full_name` VARCHAR(120) NOT NULL,
@@ -236,84 +353,160 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                     `special_accommodations` TEXT NULL,
                     `ip_address` VARCHAR(45) NOT NULL,
                     `status` ENUM('pending', 'confirmed', 'cancelled') NOT NULL DEFAULT 'pending',
-                    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    {$col_created}
+                ) ENGINE=InnoDB;
+
+                -- 12. Views Engine
+                CREATE TABLE IF NOT EXISTS `views` (
+                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    `name` VARCHAR(128) NOT NULL,
+                    `machine_name` VARCHAR(64) NOT NULL UNIQUE,
+                    `description` TEXT NULL,
+                    `base_table` VARCHAR(64) NOT NULL DEFAULT 'nodes',
+                    `display_type` VARCHAR(20) NOT NULL DEFAULT 'block',
+                    `path` VARCHAR(255) NULL,
+                    `block_id` INT UNSIGNED NULL,
+                    `configuration` LONGTEXT NOT NULL,
+                    `status` TINYINT(1) NOT NULL DEFAULT 1,
+                    {$col_created},
+                    {$col_updated},
+                    INDEX (`machine_name`),
+                    INDEX (`status`),
+                    INDEX (`path`)
+                ) ENGINE=InnoDB;
+
+                -- 13. Event Registrations Engine
+                CREATE TABLE IF NOT EXISTS `registration_forms` (
+                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    `title` VARCHAR(255) NOT NULL,
+                    `slug` VARCHAR(128) NOT NULL UNIQUE,
+                    `description` TEXT NULL,
+                    `host_type` ENUM('page', 'block') NOT NULL DEFAULT 'page',
+                    `capacity` INT UNSIGNED NOT NULL DEFAULT 0,
+                    `allow_waitlist` TINYINT(1) NOT NULL DEFAULT 1,
+                    `open_date` DATETIME NULL,
+                    `close_date` DATETIME NULL,
+                    `confirmation_message` TEXT NULL,
+                    `fields_schema` JSON NULL,
+                    `status` TINYINT(1) NOT NULL DEFAULT 1,
+                    {$col_created}
+                ) ENGINE=InnoDB;
+
+                CREATE TABLE IF NOT EXISTS `registrations` (
+                    `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    `form_id` INT UNSIGNED NOT NULL DEFAULT 0,
+                    `user_id` INT UNSIGNED NULL,
+                    `name` VARCHAR(120) NOT NULL,
+                    `email` VARCHAR(254) NOT NULL,
+                    `phone` VARCHAR(30) NULL,
+                    `organization` VARCHAR(150) NULL,
+                    `slots` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+                    `state` ENUM('complete', 'waitlist', 'cancelled') NOT NULL DEFAULT 'complete',
+                    `submission_data` JSON NULL,
+                    `ip_address` VARCHAR(45) NOT NULL,
+                    {$col_created},
+                    INDEX (`form_id`),
+                    INDEX (`email`),
+                    INDEX (`state`)
                 ) ENGINE=InnoDB;
             ");
 
             // Seed Roles & Permissions
             $pdo->exec("
-                INSERT IGNORE INTO `roles` (`id`, `name`, `description`) VALUES
-                (1, 'administrator', 'Full platform and administrative system access.'),
-                (2, 'editor', 'Can draft, update, and manage portal content.'),
-                (3, 'viewer', 'Authenticated standard viewer.');
+                INSERT IGNORE INTO `roles` (`id`, `machine_name`, `label`, `description`) VALUES
+                (1, 'administrator', 'Administrator', 'Full platform and administrative system access.'),
+                (2, 'editor', 'Content Editor', 'Can draft, update, and manage portal content.'),
+                (3, 'authenticated', 'Authenticated User', 'Standard registered user account.');
 
-                INSERT IGNORE INTO `permissions` (`id`, `name`, `description`) VALUES
+                INSERT IGNORE INTO `permissions` (`id`, `machine_name`, `description`) VALUES
                 (1, 'administer_site', 'Administer global site settings, modules, and database.'),
-                (2, 'administer_content_types', 'Configure content schemas and field display layouts.'),
-                (3, 'create_content', 'Create new pages, articles, and media attachments.'),
-                (4, 'edit_any_content', 'Edit and revise all existing content nodes.');
+                (2, 'administer_users', 'Create and modify user accounts and roles.'),
+                (3, 'administer_content_types', 'Configure content schemas and field display layouts.'),
+                (4, 'create_content', 'Create new pages, articles, and media attachments.'),
+                (5, 'edit_any_content', 'Edit and revise all existing content nodes.'),
+                (6, 'delete_any_content', 'Permanently delete content nodes.');
 
                 INSERT IGNORE INTO `role_permissions` (`role_id`, `permission_id`) VALUES
-                (1, 1), (1, 2), (1, 3), (1, 4),
-                (2, 3), (2, 4);
+                (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6),
+                (2, 4), (2, 5);
             ");
 
-            // Create Administrator User
-            $hashed_pass = password_hash($admin_pass, PASSWORD_BCRYPT);
-            $user_stmt = $pdo->prepare('INSERT INTO `users` (`username`, `password`, `email`, `status`) VALUES (?, ?, ?, 1)');
+            // Create Administrator Account
+            $hashed_pass = password_hash($admin_pass, PASSWORD_DEFAULT);
+            $user_stmt = $pdo->prepare('INSERT INTO `users` (`username`, `password_hash`, `email`, `status`) VALUES (?, ?, ?, 1)');
             $user_stmt->execute([$admin_user, $hashed_pass, $admin_email]);
             $admin_uid = (int)$pdo->lastInsertId();
-
             $pdo->prepare('INSERT INTO `user_roles` (`user_id`, `role_id`) VALUES (?, 1)')->execute([$admin_uid]);
 
-            // Seed Default Content Types
+            // Seed Content Types with Default Pathauto Patterns
             $article_schema = json_encode([
+                [
+                    'name'          => 'field_article_photo',
+                    'label'         => 'Lead Photo',
+                    'type'          => 'image',
+                    'label_display' => 'hidden',
+                    'weight'        => 10,
+                    'required'      => 0,
+                    'help_text'     => 'Primary featured graphic.'
+                ],
+                [
+                    'name'          => 'body',
+                    'label'         => 'Body Content',
+                    'type'          => 'body',
+                    'label_display' => 'hidden',
+                    'weight'        => 20,
+                    'required'      => 0,
+                    'help_text'     => 'Main article copy.'
+                ],
                 [
                     'name'          => 'subtitle',
                     'label'         => 'Article Subtitle',
                     'type'          => 'text',
-                    'placement'     => 'header_meta',
                     'label_display' => 'hidden',
-                    'weight'        => 0,
-                    'required'      => 0
+                    'weight'        => 30,
+                    'required'      => 0,
+                    'help_text'     => ''
                 ],
                 [
                     'name'          => 'publication_date',
-                    'label'         => 'Official Release Date',
+                    'label'         => 'Release Date',
                     'type'          => 'date',
-                    'placement'     => 'header_meta',
                     'label_display' => 'inline',
-                    'weight'        => 10,
-                    'required'      => 0
-                ],
+                    'weight'        => 40,
+                    'required'      => 0,
+                    'help_text'     => ''
+                ]
+            ]);
+
+            $page_schema = json_encode([
                 [
-                    'name'          => 'document_attachment',
-                    'label'         => 'Document PDF Attachment',
-                    'type'          => 'file',
-                    'placement'     => 'below_body',
-                    'label_display' => 'inline',
-                    'weight'        => 20,
-                    'required'      => 0
+                    'name'          => 'body',
+                    'label'         => 'Body Content',
+                    'type'          => 'body',
+                    'label_display' => 'hidden',
+                    'weight'        => 10,
+                    'required'      => 0,
+                    'help_text'     => ''
                 ]
             ]);
 
             $pdo->prepare("
-                INSERT IGNORE INTO `content_types` (`type`, `name`, `description`, `fields_schema`, `has_body`) VALUES
-                ('page', 'Basic Page', 'Standard corporate informational page with main menu integration.', '[]', 1),
-                ('article', 'News & Updates', 'Official press releases, media statements, and project milestones.', ?, 1)
-            ")->execute([$article_schema]);
+                INSERT IGNORE INTO `content_types` (`type`, `name`, `description`, `fields_schema`, `has_body`, `url_pattern`) VALUES
+                ('page', 'Basic Page', 'Static informational page integrated into site hierarchy.', ?, 1, '[node:title]'),
+                ('article', 'News & Updates', 'Time-sensitive press releases and project announcements.', ?, 1, 'news/[node:created:Y]/[node:title]')
+            ")->execute([$page_schema, $article_schema]);
 
             // Seed Taxonomy Vocabulary & Terms
             $pdo->exec("
-                INSERT IGNORE INTO `taxonomy_vocabularies` (`id`, `machine_name`, `name`) VALUES
-                (1, 'topics', 'Program Topics');
+                INSERT IGNORE INTO `taxonomy_vocabularies` (`id`, `machine_name`, `name`, `description`) VALUES
+                (1, 'topics', 'Program Topics', 'Primary environmental cleanup classifications.');
 
-                INSERT IGNORE INTO `taxonomy_terms` (`vid`, `name`, `slug`) VALUES
-                (1, 'Environmental Remediation', 'environmental-remediation'),
-                (1, 'Groundwater Protection', 'groundwater-protection'),
-                (1, 'Facility Deactivation', 'facility-deactivation'),
-                (1, 'Community Outreach', 'community-outreach'),
-                (1, 'Safety & Training', 'safety-training');
+                INSERT IGNORE INTO `taxonomy_terms` (`vocabulary_id`, `name`, `slug`, `weight`) VALUES
+                (1, 'Environmental Remediation', 'environmental-remediation', 0),
+                (1, 'Groundwater Protection', 'groundwater-protection', 10),
+                (1, 'Facility Deactivation', 'facility-deactivation', 20),
+                (1, 'Community Outreach', 'community-outreach', 30),
+                (1, 'Safety & Training', 'safety-training', 40);
             ");
 
             // Seed Global Site Settings
@@ -325,22 +518,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                 'footer_copyright'     => "{$site_name}, LLC. All Rights Reserved.",
                 'footer_disclaimer'    => "{$site_name} manages the Deactivation Project at the Paducah Gaseous Diffusion Plant for the U.S. Department of Energy.",
                 'notify_contact_email' => $admin_email,
+                'notify_workflow_email'=> $admin_email,
+                'mail_driver'          => 'mail',
+                'mail_from_address'    => $admin_email,
+                'mail_from_name'       => $site_name,
+                'ga_measurement_id'    => ''
             ];
             foreach ($settings as $k => $v) {
                 $settings_stmt->execute([$k, $v]);
             }
 
-            // Seed Initial Starter Pages
+            // Seed Starter Nodes with Portable Formats and Slugs
             $node_stmt = $pdo->prepare("
-                INSERT INTO `nodes` (`type`, `title`, `slug`, `body`, `keywords`, `fields_data`, `uid`, `status`)
-                VALUES (?, ?, ?, ?, ?, '{}', ?, 'published')
+                INSERT INTO `nodes` (`type`, `title`, `slug`, `auto_slug`, `body`, `format`, `keywords`, `fields_data`, `uid`, `status`)
+                VALUES (?, ?, ?, 1, ?, 'filtered_html', ?, '{}', ?, 'published')
             ");
 
             $node_stmt->execute([
                 'page',
                 'Welcome to the Paducah Deactivation Project',
                 'home',
-                '<p>Four Rivers Nuclear Partnership, LLC (FRNP) is proud to lead the safe, compliant deactivation and environmental remediation of the Paducah Gaseous Diffusion Plant for the U.S. Department of Energy (DOE).</p><p>Our dedicated workforce prioritizes safety, operational excellence, and environmental stewardship across western Kentucky.</p>',
+                '<p>Four Rivers Nuclear Partnership, LLC (FRNP) leads the safe, compliant deactivation and environmental remediation of the Paducah Gaseous Diffusion Plant for the U.S. Department of Energy (DOE).</p><p>Our dedicated workforce prioritizes safety, operational excellence, and environmental stewardship across western Kentucky.</p>',
                 'home, paducah, environmental remediation, DOE, cleanup',
                 $admin_uid
             ]);
@@ -370,59 +568,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                 'page',
                 'Contact Communications',
                 'contact',
-                '<p>For public inquiries, media relations, or stakeholder briefings, please contact Four Rivers Nuclear Partnership Communications at 5511 Hobbs Road, Kevil, KY 42053.</p>',
+                '<p>For public inquiries, media relations, or stakeholder briefings, contact Four Rivers Nuclear Partnership Communications at 5511 Hobbs Road, Kevil, KY 42053.</p>',
                 'contact, office, email, phone, media inquiries',
                 $admin_uid
             ]);
             $contact_id = (int)$pdo->lastInsertId();
 
-            // Seed Default Menu Items
+            // Seed Default Menu Links (Relative Root Paths, No Hardcoded /cms/)
             $menu_stmt = $pdo->prepare('INSERT INTO `menu_items` (`menu_name`, `node_id`, `title`, `url`, `weight`, `parent_id`) VALUES (?, ?, ?, ?, ?, ?)');
-            $menu_stmt->execute(['main', $home_id, 'Home', '/cms/home', 0, null]);
-            $menu_stmt->execute(['main', $about_id, 'About Us', '/cms/about-us', 10, null]);
+            $menu_stmt->execute(['main', $home_id, 'Home', '/home', 0, null]);
+            $menu_stmt->execute(['main', $about_id, 'About Us', '/about-us', 10, null]);
             $parent_about_id = (int)$pdo->lastInsertId();
+            $menu_stmt->execute(['main', $prog_id, 'Program Areas', '/program-areas', 20, null]);
+            $menu_stmt->execute(['main', null, 'News & Releases', '/news', 30, null]);
+            $menu_stmt->execute(['main', $contact_id, 'Contact', '/contact', 40, null]);
+            $menu_stmt->execute(['main', null, 'Site Tours', '/tours', 10, $parent_about_id]);
 
-            $menu_stmt->execute(['main', $prog_id, 'Program Areas', '/cms/program-areas', 20, null]);
-            $menu_stmt->execute(['main', null, 'News & Releases', '/cms/news', 30, null]);
-            $menu_stmt->execute(['main', $contact_id, 'Contact', '/cms/contact', 40, null]);
-
-            // Add Submenu Child Link
-            $menu_stmt->execute(['main', null, 'Site Tours', '/cms/tours', 10, $parent_about_id]);
-
-            // Seed Default Views
+            // Seed Default Sidebar Matrix Block
             $pdo->exec("
-                INSERT IGNORE INTO `views` (`machine_name`, `title`, `path`, `content_type`, `layout_style`, `items_per_page`, `sort_field`, `sort_order`, `exposed_taxonomy`, `exposed_search`, `header_text`) VALUES
-                ('document_repository', 'Cleanup Documents & Reports', 'documents', 'article', 'data_table', 15, 'created_at', 'DESC', 1, 1, '<p>Search and download official Paducah Site environmental reports and compliance notices.</p>'),
-                ('safety_bulletins', 'Safety & Operations Bulletins', 'bulletins', 'page', 'grid_cards', 9, 'created_at', 'DESC', 1, 0, '<p>Operational bulletins, site alerts, and environmental safety protocols.</p>');
+                INSERT IGNORE INTO `blocks` (`title`, `region`, `body`, `weight`, `status`, `visibility_pages`, `visibility_mode`) VALUES
+                ('Paducah Community Outreach', 'sidebar', '<p>FRNP supports educational development, STEM initiatives, and community service across western Kentucky.</p>', 10, 1, '', 'show_only');
             ");
 
-            // 5. Write `config/database.php`
+            // Write Generated `config/database.php`
             $config_dir = __DIR__ . '/config';
             if (!is_dir($config_dir)) {
                 mkdir($config_dir, 0755, true);
             }
-
-            $db_config_code = "<?php\ndeclare(strict_types=1);\n\n/**\n * Auto-generated Database Configuration\n */\ndefine('DB_HOST', " . var_export($db_host, true) . ");\ndefine('DB_PORT', " . (int)$db_port . ");\ndefine('DB_NAME', " . var_export($db_name, true) . ");\ndefine('DB_USER', " . var_export($db_user, true) . ");\ndefine('DB_PASS', " . var_export($db_pass, true) . ");\n\nfunction get_db(): \\PDO {\n    static \$pdo = null;\n    if (\$pdo === null) {\n        \$dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', DB_HOST, DB_PORT, DB_NAME);\n        \$pdo = new \\PDO(\$dsn, DB_USER, DB_PASS, [\n            \\PDO::ATTR_ERRMODE            => \\PDO::ERRMODE_EXCEPTION,\n            \\PDO::ATTR_DEFAULT_FETCH_MODE => \\PDO::FETCH_ASSOC,\n            \\PDO::ATTR_EMULATE_PREPARES   => false,\n        ]);\n    }\n    return \$pdo;\n}\n";
+            $db_config_code = "<?php\ndeclare(strict_types=1);\n\ndefine('DB_HOST', " . var_export($db_host, true) . ");\ndefine('DB_PORT', " . (int)$db_port . ");\ndefine('DB_NAME', " . var_export($db_name, true) . ");\ndefine('DB_USER', " . var_export($db_user, true) . ");\ndefine('DB_PASS', " . var_export($db_pass, true) . ");\n\nfunction get_db(): \\PDO {\n    static \$pdo = null;\n    if (\$pdo === null) {\n        \$dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', DB_HOST, DB_PORT, DB_NAME);\n        \$pdo = new \\PDO(\$dsn, DB_USER, DB_PASS, [\n            \\PDO::ATTR_ERRMODE            => \\PDO::ERRMODE_EXCEPTION,\n            \\PDO::ATTR_DEFAULT_FETCH_MODE => \\PDO::FETCH_ASSOC,\n            \\PDO::ATTR_EMULATE_PREPARES   => false,\n        ]);\n    }\n    return \$pdo;\n}\n";
             file_put_contents($config_dir . '/database.php', $db_config_code);
 
-            // Ensure Uploads Subdirectories Exist
-            $upload_dirs = [
+            // Ensure Uploads & System Folders Exist
+            $subdirs = [
                 __DIR__ . '/uploads',
                 __DIR__ . '/uploads/files',
                 __DIR__ . '/custom_pages'
             ];
-            foreach ($upload_dirs as $d) {
+            foreach ($subdirs as $d) {
                 if (!is_dir($d)) {
                     mkdir($d, 0755, true);
                 }
             }
 
-            // 6. Write Lock File
+            // Write Security Lock File
             file_put_contents($lock_file, "Installed on " . date('Y-m-d H:i:s') . " by UID {$admin_uid}\n");
-
             $success = true;
         } catch (\Throwable $e) {
-            $errors[] = 'Database setup failed: ' . $e->getMessage();
+            $errors[] = 'Database installation failed: ' . $e->getMessage();
         }
     }
 }
@@ -432,7 +624,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CMS Platform Installation - Four Rivers Nuclear Partnership</title>
+    <title>CMS Deployment & Installation Wizard</title>
     <style>
         :root {
             --frnp-navy: #0b2545;
@@ -457,8 +649,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
             border-bottom: 4px solid var(--frnp-gold);
             text-align: center;
         }
-        .header h1 { font-size: 1.6rem; letter-spacing: 0.5px; }
-        .header p { color: #94a3b8; font-size: 0.9rem; margin-top: 4px; }
+        .header h1 { font-size: 1.5rem; letter-spacing: 0.5px; }
+        .header p { color: #94a3b8; font-size: 0.88rem; margin-top: 4px; }
         .container {
             max-width: 820px;
             margin: 30px auto 0;
@@ -540,18 +732,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
         <h1>FOUR RIVERS NUCLEAR PARTNERSHIP</h1>
         <p>CMS Platform Deployment & Database Provisioning Wizard</p>
     </div>
-
     <div class="container">
         <?php if ($success): ?>
             <div class="alert alert-success">
-                <h3 style="margin-bottom:8px; font-size:1.1rem;">✓ Installation Completed Successfully!</h3>
-                <p>The database tables have been provisioned, default content types and views seeded, and <code>config/database.php</code> has been generated.</p>
+                <h3 style="margin-bottom:8px; font-size:1.1rem;">Installation Completed Successfully!</h3>
+                <p>All database tables, Pathauto rules, custom events, telemetry handlers, and default starter nodes have been created.</p>
                 <p style="margin-top:8px;">The installation lock (<code>config/installed.lock</code>) has been written to prevent duplicate setup executions.</p>
             </div>
-
             <div style="text-align: center; margin-top: 30px; display:flex; gap:15px; justify-content:center;">
-                <a href="/cms/admin/login.php" style="background:#0b2545; color:#fff; text-decoration:none; padding:12px 24px; border-radius:4px; font-weight:600;">Log In to Dashboard</a>
-                <a href="/cms/home" style="background:#f1f5f9; color:#0b2545; border:1px solid #cbd5e1; text-decoration:none; padding:12px 24px; border-radius:4px; font-weight:600;">View Published Site</a>
+                <a href="<?= htmlspecialchars($login_url) ?>" style="background:#0b2545; color:#fff; text-decoration:none; padding:12px 24px; border-radius:4px; font-weight:600;">Log In to Dashboard</a>
+                <a href="<?= htmlspecialchars($home_url) ?>" style="background:#f1f5f9; color:#0b2545; border:1px solid #cbd5e1; text-decoration:none; padding:12px 24px; border-radius:4px; font-weight:600;">View Published Site</a>
             </div>
         <?php else: ?>
             <?php if (!empty($errors)): ?>
@@ -562,7 +752,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                 </div>
             <?php endif; ?>
 
-            <!-- Pre-flight Environment Check -->
             <h3 class="section-title">1. Server Environment Verification</h3>
             <table class="env-table">
                 <tbody>
@@ -570,7 +759,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                         <tr>
                             <td><?= htmlspecialchars($check) ?></td>
                             <td class="<?= $passed ? 'status-pass' : 'status-fail' ?>">
-                                <?= $passed ? 'PASS ✓' : 'FAIL ✗' ?>
+                                <?= $passed ? 'PASS &#10003;' : 'FAIL &#10007;' ?>
                             </td>
                         </tr>
                     <?php endforeach; ?>
@@ -583,7 +772,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                 </div>
             <?php else: ?>
                 <form method="POST">
-                    <!-- Blank Database Credentials -->
                     <h3 class="section-title">2. Database Credentials (Blank Database)</h3>
                     <div class="form-grid">
                         <div class="form-row">
@@ -610,7 +798,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $can_install) {
                         <input type="password" name="db_pass" placeholder="Leave blank if no password">
                     </div>
 
-                    <!-- Platform & Admin Setup -->
                     <h3 class="section-title">3. Site Name & Administrator Account</h3>
                     <div class="form-row">
                         <label>Site / Organization Name *</label>
