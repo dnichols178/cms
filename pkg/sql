@@ -1,0 +1,10 @@
+INSERT INTO `content_types` (`type`, `name`, `description`, `has_body`, `url_pattern`, `fields_schema`) VALUES
+('page', 'Basic Page', 'Standard static informational page (e.g., About, Environmental Services).', 1, '[node:title]', '[]'),
+('article', 'News & Updates', '', 1, 'news/[node:title]', '[{"name":"field_article_photo","label":"Article Photo","type":"image","help_text":"","required":0,"options":[],"weight":10,"placement":"below_body","label_display":"hidden"},{"name":"body","label":"Body Content","type":"body","required":0,"label_display":"hidden","weight":20,"help_text":"Main article text or rich content."},{"name":"subtitle","label":"Subtitle \\/ Deck","type":"text","placement":"above_body","label_display":"hidden","weight":30}]'),
+('rfp_node', 'Request for Proposal', '', 1, '/rfp/[node:rfp_number]/[node:title]', '[{"name":"field_rfp_number","label":"RFP Number","type":"text","help_text":"","required":1,"options":[],"weight":10,"label_display":"inline"},{"name":"body","label":"Body Content","type":"body","required":0,"label_display":"hidden","weight":20,"help_text":"Main article text or rich content."},{"name":"field_rfp_attachment","label":"Associated Documents","type":"file","help_text":"","required":0,"options":[],"weight":30},{"name":"field_rfp_amendments","label":"Amendments","type":"file","help_text":"","required":0,"options":[],"weight":40,"label_display":"inline","upload_dir":"rfp"}]')
+ON DUPLICATE KEY UPDATE 
+    `name` = VALUES(`name`),
+    `description` = VALUES(`description`),
+    `has_body` = VALUES(`has_body`),
+    `url_pattern` = VALUES(`url_pattern`),
+    `fields_schema` = VALUES(`fields_schema`);
